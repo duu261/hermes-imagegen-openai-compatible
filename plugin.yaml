@@ -1,0 +1,17 @@
+name: openai-compatible
+version: 1.0.0
+description: Generic OpenAI-compatible image generation backend for Hermes Agent (LiteLLM, LocalAI, vLLM, private proxies)
+author: Duu
+kind: backend
+provides_image_gen_providers:
+  - openai-compatible
+requires_env:
+  - name: OPENAI_COMPAT_IMAGE_BASE_URL
+    description: "OpenAI-compatible image endpoint base URL (e.g. http://localhost:8000/v1)"
+    optional: true
+  - name: OPENAI_COMPAT_IMAGE_MODEL
+    description: "Image generation model ID (e.g. google/gemini-3.1-flash-image)"
+    optional: true
+  - name: OPENAI_COMPAT_IMAGE_API_KEY
+    description: "API key for the endpoint (defaults to 'dummy' if omitted)"
+    optional: true
