@@ -11,6 +11,12 @@ Routes `image_generate` tool calls to any custom or local endpoint implementing 
 - Decodes base64 (`b64_json`) or fetches URL image payloads and stores them under `$HERMES_HOME/cache/images/` for native media rendering (Telegram, Discord, CLI, TUI).
 - Isolated environment variable namespace (`OPENAI_COMPAT_IMAGE_*`) to avoid polluting global `OPENAI_BASE_URL`.
 
+## Why this is a plugin
+
+This plugin keeps custom image routing separate from Hermes Agent's core OpenAI configuration. It does **not** change `OPENAI_BASE_URL`, `OPENAI_API_KEY`, Hermes model routing, or other built-in tools. Hermes dispatches to this backend only when `image_gen.provider` is set to `openai-compatible`; switching to another image provider immediately bypasses it.
+
+The endpoint, model, and credential use separate `OPENAI_COMPAT_IMAGE_*` settings. This makes custom image routing opt-in and reversible while preserving Hermes core behavior.
+
 ## Installation
 
 ### From GitHub
