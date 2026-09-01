@@ -1,15 +1,22 @@
-"""OpenAI-Compatible Image Generation Provider Plugin for Hermes Agent.
+"""OpenAI Images-compatible GPT-Image2 provider plugin for Hermes Agent.
 
-Provides a generic backend for any OpenAI-compatible `/v1/images/generations` &
-`/v1/images/edits` API (LiteLLM, LocalAI, vLLM, private reverse proxies, etc.).
+Provides a basic backend for a trusted OpenAI-compatible
+`/v1/images/generations` and `/v1/images/edits` API.
 """
 
 from __future__ import annotations
 
 import io
+import base64
+import ipaddress
 import logging
 import os
+import socket
+import urllib.error
+import urllib.request
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from agent.image_gen_provider import (
     DEFAULT_ASPECT_RATIO,
@@ -24,8 +31,17 @@ from agent.image_gen_provider import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "image-model-v1"
-DEFAULT_BASE_URL = "http://localhost:8000/v1"
+DEFAULT_MODEL = "gpt-image-2"
+DEFAULT_BASE_URL = ""
+GPT_IMAGE_2_MODEL = "gpt-image-2"
+GPT_IMAGE_2_SIZES = {
+    "landscape": "1536x1024",
+    "square": "1024x1024",
+    "portrait": "1024x1536",
+}
+GPT_IMAGE_2_QUALITIES = {"low", "medium", "high", "auto"}
+MAX_SOURCE_IMAGE_BYTES = 50 * 1024 * 1024
+LOCAL_HTTP_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
 def _load_image_bytes(ref: str) -> Tuple[bytes, str]:
@@ -33,20 +49,39 @@ def _load_image_bytes(ref: str) -> Tuple[bytes, str]:
     ref = ref.strip()
     lower = ref.lower()
     if lower.startswith(("http://", "https://")):
-        import requests
-
-        resp = requests.get(ref, timeout=60)
-        resp.raise_for_status()
-        name = ref.split("?", 1)[0].rsplit("/", 1)[-1] or "image.png"
-        return resp.content, name
+        parsed = urlparse(ref)
+        if parsed.scheme != "https" or parsed.username or parsed.password or not parsed.hostname:
+            raise ValueError("source image URLs must use HTTPS without embedded credentials")
+        _reject_private_host(parsed.hostname)
+        request = urllib.request.Request(ref, headers={"Accept": "image/*"}, method="GET")
+        opener = urllib.request.build_opener(_NoRedirectHandler())
+        try:
+            with opener.open(request, timeout=60) as response:
+                content_type = (response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+                if not content_type.startswith("image/"):
+                    raise ValueError("source URL did not return an image")
+                data = response.read(MAX_SOURCE_IMAGE_BYTES + 1)
+        except urllib.error.HTTPError as exc:
+            raise ValueError(f"source image request returned HTTP {exc.code}") from None
+        except (urllib.error.URLError, TimeoutError, socket.timeout):
+            raise ValueError("could not reach source image URL") from None
+        if len(data) > MAX_SOURCE_IMAGE_BYTES:
+            raise ValueError("source image exceeds the 50MB limit")
+        name = Path(parsed.path).name or "image.png"
+        return data, name
     if lower.startswith("data:"):
-        import base64
-
-        header, _, b64 = ref.partition(",")
-        ext = "png"
-        if "image/" in header:
-            ext = header.split("image/", 1)[1].split(";", 1)[0] or "png"
-        return base64.b64decode(b64), f"image.{ext}"
+        header, separator, b64 = ref.partition(",")
+        if not separator or not header.lower().startswith("data:image/"):
+            raise ValueError("source data URL must contain an image MIME type")
+        mime_type = header[5:].split(";", 1)[0].lower()
+        ext = mime_type.split("/", 1)[1] or "png"
+        try:
+            data = base64.b64decode(b64, validate=True)
+        except ValueError:
+            raise ValueError("source data URL contains invalid base64") from None
+        if len(data) > MAX_SOURCE_IMAGE_BYTES:
+            raise ValueError("source image exceeds the 50MB limit")
+        return data, f"image.{ext}"
 
     from agent.file_safety import raise_if_read_blocked
 
@@ -54,11 +89,55 @@ def _load_image_bytes(ref: str) -> Tuple[bytes, str]:
     with open(ref, "rb") as fh:
         data = fh.read()
     name = os.path.basename(ref) or "image.png"
+    if len(data) > MAX_SOURCE_IMAGE_BYTES:
+        raise ValueError("source image exceeds the 50MB limit")
     return data, name
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _reject_private_host(hostname: str) -> None:
+    try:
+        addresses = socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        raise ValueError("could not resolve source image host") from None
+    for address in addresses:
+        try:
+            ip = ipaddress.ip_address(address[4][0])
+        except ValueError:
+            continue
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            raise ValueError("source image host resolves to a private or local address")
+
+
+def _validate_base_url(base_url: str) -> str:
+    parsed = urlparse(base_url)
+    hostname = (parsed.hostname or "").lower()
+    if parsed.username or parsed.password or not parsed.netloc:
+        raise ValueError("image base URL must be absolute and contain no embedded credentials")
+    if parsed.scheme == "https":
+        return base_url.rstrip("/")
+    if parsed.scheme == "http" and hostname in LOCAL_HTTP_HOSTS:
+        return base_url.rstrip("/")
+    raise ValueError("remote image base URLs must use HTTPS; HTTP is allowed only for localhost")
+
+
+def _resolve_model(raw_model: Any) -> Tuple[str, str, str]:
+    configured = os.environ.get("OPENAI_COMPAT_IMAGE_MODEL", "").strip()
+    selected = configured or (raw_model.strip() if isinstance(raw_model, str) else "") or DEFAULT_MODEL
+    if selected in {"gpt-image-2-low", "gpt-image-2-medium", "gpt-image-2-high"}:
+        quality = selected.rsplit("-", 1)[1]
+        return selected, GPT_IMAGE_2_MODEL, quality
+    if selected == GPT_IMAGE_2_MODEL:
+        return selected, selected, "medium"
+    return selected, selected, ""
+
+
 class OpenAICompatibleImageGenProvider(ImageGenProvider):
-    """Generic OpenAI-compatible image generation and editing backend."""
+    """OpenAI Images-compatible generation and editing backend."""
 
     @property
     def name(self) -> str:
@@ -69,7 +148,9 @@ class OpenAICompatibleImageGenProvider(ImageGenProvider):
         return "OpenAI-Compatible"
 
     def is_available(self) -> bool:
-        """Check if openai package is available."""
+        """Check whether the SDK and an explicit endpoint are configured."""
+        if not os.environ.get("OPENAI_COMPAT_IMAGE_BASE_URL", "").strip():
+            return False
         try:
             import openai  # noqa: F401
         except ImportError:
@@ -98,9 +179,7 @@ class OpenAICompatibleImageGenProvider(ImageGenProvider):
             "env_vars": [
                 {
                     "key": "OPENAI_COMPAT_IMAGE_BASE_URL",
-                    "prompt": "Base URL (default: http://localhost:8000/v1)",
-                    "url": "http://localhost:8000/v1",
-                    "optional": True,
+                    "prompt": "HTTPS base URL for the OpenAI-compatible image endpoint",
                 },
                 {
                     "key": "OPENAI_COMPAT_IMAGE_MODEL",
@@ -117,7 +196,7 @@ class OpenAICompatibleImageGenProvider(ImageGenProvider):
         }
 
     def capabilities(self) -> Dict[str, Any]:
-        return {"modalities": ["text", "image"], "max_reference_images": 4}
+        return {"modalities": ["text", "image"], "max_reference_images": 16}
 
     def generate(
         self,
@@ -149,18 +228,29 @@ class OpenAICompatibleImageGenProvider(ImageGenProvider):
                 aspect_ratio=aspect,
             )
 
-        base_url = os.environ.get("OPENAI_COMPAT_IMAGE_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
+        model, api_model, quality = _resolve_model(kwargs.get("model"))
+        raw_base_url = os.environ.get("OPENAI_COMPAT_IMAGE_BASE_URL", DEFAULT_BASE_URL).strip()
+        if not raw_base_url:
+            return error_response(
+                error="OPENAI_COMPAT_IMAGE_BASE_URL is not configured",
+                error_type="configuration_error",
+                provider=self.name,
+                model=model,
+                prompt=prompt,
+                aspect_ratio=aspect,
+            )
+        try:
+            base_url = _validate_base_url(raw_base_url)
+        except ValueError as exc:
+            return error_response(
+                error=str(exc),
+                error_type="configuration_error",
+                provider=self.name,
+                model=model,
+                prompt=prompt,
+                aspect_ratio=aspect,
+            )
         api_key = os.environ.get("OPENAI_COMPAT_IMAGE_API_KEY", "dummy")
-
-        model_override = os.environ.get("OPENAI_COMPAT_IMAGE_MODEL", "").strip()
-        if model_override:
-            model = model_override
-        else:
-            raw_model = (kwargs.get("model") or "").strip()
-            if raw_model and not raw_model.startswith("fal-ai/"):
-                model = raw_model
-            else:
-                model = DEFAULT_MODEL
 
         # Collect source images for image-to-image / edit
         sources: List[str] = []
@@ -168,12 +258,22 @@ class OpenAICompatibleImageGenProvider(ImageGenProvider):
             sources.append(image_url.strip())
         for ref in (normalize_reference_images(reference_image_urls) or []):
             sources.append(ref)
-        sources = sources[:4]
+        sources = sources[:16]
         is_edit = bool(sources)
         modality = "image" if is_edit else "text"
 
         try:
             client = openai.OpenAI(base_url=base_url, api_key=api_key)
+
+            image_options: Dict[str, Any] = {}
+            if api_model == GPT_IMAGE_2_MODEL:
+                image_options["size"] = GPT_IMAGE_2_SIZES[aspect]
+                requested_quality = kwargs.get("quality")
+                image_options["quality"] = (
+                    requested_quality
+                    if isinstance(requested_quality, str) and requested_quality in GPT_IMAGE_2_QUALITIES
+                    else quality
+                )
 
             if is_edit:
                 files = []
@@ -184,15 +284,17 @@ class OpenAICompatibleImageGenProvider(ImageGenProvider):
                     files.append(bio)
 
                 response = client.images.edit(
-                    model=model,
+                    model=api_model,
                     image=files if len(files) > 1 else files[0],
                     prompt=prompt,
+                    **image_options,
                     n=1,
                 )
             else:
                 response = client.images.generate(
-                    model=model,
+                    model=api_model,
                     prompt=prompt,
+                    **image_options,
                     n=1,
                 )
 
@@ -240,10 +342,10 @@ class OpenAICompatibleImageGenProvider(ImageGenProvider):
                     aspect_ratio=aspect,
                 )
 
-        except Exception as exc:
+        except Exception:
             logger.debug("OpenAI-compatible image generation failed", exc_info=True)
             return error_response(
-                error=f"OpenAI-compatible image generation failed: {exc}",
+                error="OpenAI-compatible image generation request failed",
                 error_type="api_error",
                 provider=self.name,
                 model=model,
