@@ -58,6 +58,18 @@ development on `localhost`, `127.0.0.1`, or `::1`. Source image URLs must use
 HTTPS, cannot redirect, cannot resolve to private/local addresses, and are
 bounded to 50MB. Credentials must never appear in URLs.
 
+## Download trust boundary
+
+Use only an endpoint you trust. When the endpoint returns an image `url`, Hermes
+fetches it from the machine running Hermes and caches the response. Output URLs
+use Hermes' standard image downloader, not this plugin's restricted source-image
+loader. They are not confined to public network destinations; an unsafe endpoint
+response can cause requests to local or private-network services reachable from
+that machine. The downloader is not a network sandbox.
+
+This trust boundary applies to URL output only. Base64 (`b64_json`) output is
+saved directly and does not cause a separate image-URL download.
+
 ## GPT-Image2 scope
 
 This plugin provides the basic OpenAI Images API path needed for GPT-Image2
