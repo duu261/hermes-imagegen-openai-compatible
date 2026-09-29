@@ -12,6 +12,7 @@ New API deployment. It is not a native Codex `image_generation` protocol adapter
 - Supports text-to-image generation (`images.generate`) and image-to-image / reference editing (`images.edit`).
 - Maps Hermes `landscape`, `square`, and `portrait` to GPT-Image2 sizes `1536x1024`, `1024x1024`, and `1024x1536`.
 - Supports GPT-Image2 quality tiers through `gpt-image-2-low`, `gpt-image-2-medium`, `gpt-image-2-high`, or exact `gpt-image-2` (medium default).
+- Sends the same size and `quality: medium` default for `gpt-image-2.5`, `gpt-image-2.5-flare`, and `gpt-image-2.5-sunburst`; Codex-backed proxies otherwise render them at `low`.
 - Accepts up to 16 source images for GPT-Image2 editing.
 - Decodes base64 (`b64_json`) or fetches URL image payloads and stores them under `$HERMES_HOME/cache/images/` for native media rendering (Telegram, Discord, CLI, TUI).
 - Isolated environment variable namespace (`OPENAI_COMPAT_IMAGE_*`) to avoid polluting global `OPENAI_BASE_URL`.

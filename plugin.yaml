@@ -1,5 +1,5 @@
 name: openai-compatible
-version: 1.1.0
+version: 1.1.1
 description: OpenAI Images-compatible Hermes backend for GPT-Image2 and trusted reverse proxies
 author: Duu
 kind: backend

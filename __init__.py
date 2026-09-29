@@ -34,6 +34,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "gpt-image-2"
 DEFAULT_BASE_URL = ""
 GPT_IMAGE_2_MODEL = "gpt-image-2"
+# Models that take GPT-Image2 size + quality. Without an explicit quality the
+# Codex-backed proxies render 2.5 models at "low".
+GPT_IMAGE_SIZED_MODELS = {
+    GPT_IMAGE_2_MODEL,
+    "gpt-image-2.5",
+    "gpt-image-2.5-flare",
+    "gpt-image-2.5-sunburst",
+}
 GPT_IMAGE_2_SIZES = {
     "landscape": "1536x1024",
     "square": "1024x1024",
@@ -131,7 +139,7 @@ def _resolve_model(raw_model: Any) -> Tuple[str, str, str]:
     if selected in {"gpt-image-2-low", "gpt-image-2-medium", "gpt-image-2-high"}:
         quality = selected.rsplit("-", 1)[1]
         return selected, GPT_IMAGE_2_MODEL, quality
-    if selected == GPT_IMAGE_2_MODEL:
+    if selected in GPT_IMAGE_SIZED_MODELS:
         return selected, selected, "medium"
     return selected, selected, ""
 
@@ -266,7 +274,7 @@ class OpenAICompatibleImageGenProvider(ImageGenProvider):
             client = openai.OpenAI(base_url=base_url, api_key=api_key)
 
             image_options: Dict[str, Any] = {}
-            if api_model == GPT_IMAGE_2_MODEL:
+            if api_model in GPT_IMAGE_SIZED_MODELS:
                 image_options["size"] = GPT_IMAGE_2_SIZES[aspect]
                 requested_quality = kwargs.get("quality")
                 image_options["quality"] = (

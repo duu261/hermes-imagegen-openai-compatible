@@ -92,6 +92,25 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(call["quality"], "high")
         self.assertEqual(call["size"], "1024x1024")
 
+    def test_gpt_image_2_5_models_default_to_medium_quality(self):
+        for model in ("gpt-image-2.5", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst"):
+            FakeClient.instances.clear()
+            with patch.dict(os.environ, {"OPENAI_COMPAT_IMAGE_MODEL": model}, clear=False):
+                result = provider.OpenAICompatibleImageGenProvider().generate("draw a test", "portrait")
+            self.assertTrue(result["success"], model)
+            call = FakeClient.instances[0].images.generate_calls[0]
+            self.assertEqual(call["model"], model)
+            self.assertEqual(call["quality"], "medium")
+            self.assertEqual(call["size"], "1024x1536")
+
+    def test_unknown_model_sends_no_size_or_quality(self):
+        with patch.dict(os.environ, {"OPENAI_COMPAT_IMAGE_MODEL": "custom-image-model"}, clear=False):
+            result = provider.OpenAICompatibleImageGenProvider().generate("draw a test", "square")
+        self.assertTrue(result["success"])
+        call = FakeClient.instances[0].images.generate_calls[0]
+        self.assertNotIn("quality", call)
+        self.assertNotIn("size", call)
+
     def test_gpt_image_2_edit_uses_multipart_input_and_size(self):
         source = "data:image/png;base64," + base64.b64encode(b"source").decode()
         result = provider.OpenAICompatibleImageGenProvider().generate(
