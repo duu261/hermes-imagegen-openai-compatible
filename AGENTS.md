@@ -42,6 +42,12 @@ live in `README.md`; keep this file about how to change the plugin safely.
 - **Keep the stricter source-image loader** (HTTPS only, no redirects, private addresses refused,
   50 MB cap). Output URLs returned by the gateway use Hermes' downloader; that trust boundary is
   documented in the README, not silently widened.
+- **Plain-HTTP gateway scope is fixed.** `http://` base URLs are allowed only when every resolved
+  address is in `PRIVATE_HTTP_NETWORKS` (loopback, RFC 1918, `100.64.0.0/10`, ULA). Keep it an
+  explicit list: never switch to `ip.is_private` (it admits link-local metadata and misses
+  Tailscale), never allow on resolution failure or a mixed private/public answer, and never add an
+  "allow insecure" toggle. The source-image loader is the opposite direction (outbound fetch of
+  untrusted URLs) and keeps refusing private hosts.
 - **User-Agent tracks the manifest.** `PLUGIN_VERSION` in `__init__.py` must equal `version` in
   `plugin.yaml`; a test enforces it. Bump both, plus `CHANGELOG.md`, in the same commit.
 

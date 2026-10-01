@@ -1,5 +1,5 @@
 name: openai-compatible
-version: 2.0.0
+version: 2.0.1
 manifest_version: 2
 description: GPT Image through CLIProxyAPI, New API, or any OpenAI Images-compatible gateway
 author: duu261
@@ -14,7 +14,7 @@ config_schema:
     type: str
     default: ""
     label: Gateway base URL
-    description: "API root of the gateway, e.g. http://127.0.0.1:8317/v1 (CLIProxyAPI) or https://newapi.example/v1. HTTPS required except localhost."
+    description: "API root of the gateway, e.g. http://127.0.0.1:8317/v1 (CLIProxyAPI) or https://newapi.example/v1. HTTPS required unless the host resolves only to loopback, LAN, Tailscale or IPv6 ULA addresses."
   key_env:
     type: str
     default: OPENAI_COMPAT_IMAGE_API_KEY

@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.1
+
+- Accept plain `http://` gateways whose host resolves only to private networks (loopback, RFC 1918
+  LAN / Docker, Tailscale `100.64.0.0/10`, IPv6 ULA), so self-hosted CLIProxyAPI works by service
+  name, LAN or Tailscale address. Public, link-local (cloud metadata), unresolvable and mixed
+  private/public hosts are still refused; HTTPS is unchanged.
+
 ## 2.0.0
 
 - Settings move to `plugins.entries.openai-compatible.settings` (`base_url`, `key_env`, `quality`);

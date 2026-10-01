@@ -148,6 +148,40 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(result["error_type"], "configuration_error")
         self.assertTrue(self.make(base_url="http://127.0.0.1:8317/v1").generate("draw")["success"])
 
+    def test_http_allowed_only_for_private_networks(self):
+        allowed = ["http://127.0.0.1:8317/v1", "http://localhost:8317/v1", "http://[::1]:8317/v1",
+                   "http://10.0.0.5:8317/v1", "http://172.29.0.4:8317/v1", "http://192.168.1.10:8317/v1",
+                   "http://100.64.0.1:8317/v1", "http://100.127.255.254:8317/v1",
+                   "http://[fd7a:115c:a1e0::1]:8317/v1", "http://[::ffff:192.168.1.10]:8317/v1"]
+        refused = ["http://8.8.8.8/v1", "http://169.254.169.254/v1", "http://[fe80::1]/v1",
+                   "http://100.128.0.1/v1", "http://172.32.0.1/v1", "http://0.0.0.0/v1",
+                   "http://224.0.0.1/v1", "http://[::ffff:8.8.8.8]/v1", "http://[2001:4860::8888]/v1",
+                   "ftp://127.0.0.1/v1"]
+        for url in allowed:
+            self.assertEqual(provider._validate_base_url(url), url.rstrip("/"), url)
+        for url in refused:
+            with self.assertRaises(ValueError, msg=url):
+                provider._validate_base_url(url)
+
+    def test_http_hostname_requires_every_address_private(self):
+        def fake_resolve(addresses):
+            return lambda host, port, type=0: [(2, 1, 6, "", (a, 0)) for a in addresses]
+        with patch.object(provider.socket, "getaddrinfo", fake_resolve(["172.29.0.4"])):
+            self.assertEqual(provider._validate_base_url("http://cpa:8317/v1"), "http://cpa:8317/v1")
+        with patch.object(provider.socket, "getaddrinfo", fake_resolve(["10.0.0.2", "93.184.216.34"])):
+            with self.assertRaises(ValueError):
+                provider._validate_base_url("http://mixed.example/v1")
+        with patch.object(provider.socket, "getaddrinfo", side_effect=provider.socket.gaierror()):
+            with self.assertRaises(ValueError):
+                provider._validate_base_url("http://unresolvable.invalid/v1")
+        with patch.object(provider.socket, "getaddrinfo", fake_resolve([])):
+            with self.assertRaises(ValueError):
+                provider._validate_base_url("http://empty.example/v1")
+
+    def test_https_never_needs_resolution(self):
+        with patch.object(provider.socket, "getaddrinfo", side_effect=AssertionError("no DNS for https")):
+            self.assertEqual(provider._validate_base_url("https://8.8.8.8/v1"), "https://8.8.8.8/v1")
+
     def test_key_with_newline_rejected_without_echo(self):
         with patch.dict(os.environ, {"OPENAI_COMPAT_IMAGE_API_KEY": "secret-value\ninjected: header"}):
             result = self.make().generate("draw")
