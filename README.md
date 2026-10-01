@@ -1,88 +1,129 @@
 # hermes-imagegen-openai-compatible
 
-OpenAI Images-compatible image generation provider plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent).
+GPT Image for [Hermes Agent](https://github.com/NousResearch/hermes-agent) through your own gateway:
+[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (CPA), [New API](https://github.com/QuantumNous/new-api),
+or any server that speaks the OpenAI Images API (`/v1/images/generations` and `/v1/images/edits`).
 
-Routes Hermes `image_generate` calls to a trusted endpoint implementing the OpenAI
-`POST /v1/images/generations` and `POST /v1/images/edits` paths. It is intended for
-GPT-Image2 through an OpenAI-compatible reverse proxy, including a self-hosted
-New API deployment. It is not a native Codex `image_generation` protocol adapter.
+It plugs into the standard `image_generate` tool as the `openai-compatible` image provider. Chat
+routing, `OPENAI_BASE_URL`, `OPENAI_API_KEY` and every other Hermes subsystem stay untouched.
 
-## Features
+## Do you need this plugin?
 
-- Supports text-to-image generation (`images.generate`) and image-to-image / reference editing (`images.edit`).
-- Maps Hermes `landscape`, `square`, and `portrait` to GPT-Image2 sizes `1536x1024`, `1024x1024`, and `1024x1536`.
-- Supports GPT-Image2 quality tiers through `gpt-image-2-low`, `gpt-image-2-medium`, `gpt-image-2-high`, or exact `gpt-image-2` (medium default).
-- Sends the same size and `quality: medium` default for `gpt-image-2.5`, `gpt-image-2.5-flare`, and `gpt-image-2.5-sunburst`; Codex-backed proxies otherwise render them at `low`.
-- Accepts up to 16 source images for GPT-Image2 editing.
-- Decodes base64 (`b64_json`) or fetches URL image payloads and stores them under `$HERMES_HOME/cache/images/` for native media rendering (Telegram, Discord, CLI, TUI).
-- Isolated environment variable namespace (`OPENAI_COMPAT_IMAGE_*`) to avoid polluting global `OPENAI_BASE_URL`.
+Hermes ships a bundled `openai` image provider that also accepts a custom endpoint
+(`image_gen.openai.base_url` plus `image_gen.openai.key_env`). If you call OpenAI directly, or a
+gateway that behaves exactly like OpenAI, use the bundled one.
 
-## Why this is a plugin
+Use this plugin when your images go through CPA or New API:
 
-This plugin keeps custom image routing separate from Hermes Agent's core OpenAI configuration. It does **not** change `OPENAI_BASE_URL`, `OPENAI_API_KEY`, Hermes model routing, or other built-in tools. Hermes dispatches to this backend only when `image_gen.provider` is set to `openai-compatible`; switching to another image provider immediately bypasses it.
+- **Gateway-aware errors.** HTTP status and the gateway's own message come back to the model,
+  with hints for the usual gateway failures (Cloudflare `1010`, `524` timeouts, disabled channels,
+  wrong `/v1` root). A missing reference image is reported as `io_error` with its path before any
+  request is sent, so the model regenerates instead of retrying blind.
+- **Requested vs returned size.** Results include `requested_size`, `requested_quality` and the
+  decoded `output_size`, because Codex-backed gateways pick their own dimensions.
+- **Gateway-defined models.** Any model id the gateway serves (for example a Gemini image model
+  behind CPA) is sent verbatim, without the GPT-only `size` and `quality` fields that such
+  channels reject.
+- **Stricter source-image loading.** HTTPS only, no redirects, private addresses refused, 50 MB cap.
 
-The endpoint, model, and credential use separate `OPENAI_COMPAT_IMAGE_*` settings. This makes custom image routing opt-in and reversible while preserving Hermes core behavior.
-
-## Installation
-
-### From GitHub
+## Install
 
 ```bash
-hermes plugins install duu261/hermes-imagegen-openai-compatible --enable
+hermes plugins install duu261/hermes-imagegen-openai-compatible
+hermes plugins enable openai-compatible
 ```
 
-### From Local Path / Git URL
+Restart a running gateway afterwards (`hermes gateway restart`); new `hermes chat` sessions pick it
+up directly.
+
+## Configure
 
 ```bash
-hermes plugins install file:///path/to/hermes-imagegen-openai-compatible --enable
-```
-
-## Setup & Configuration
-
-1. Set `openai-compatible` as your active provider and model in Hermes:
-
-```bash
+# 1. Select the provider and a model
 hermes config set image_gen.provider openai-compatible
-hermes config set image_gen.model <your-model-id>
+hermes config set image_gen.model gpt-image-2
+
+# 2. Point it at your gateway's API root
+hermes config set plugins.entries.openai-compatible.settings.base_url http://127.0.0.1:8317/v1
 ```
 
-2. Configure environment variables in `~/.hermes/.env`:
+3. Put the gateway key in `~/.hermes/.env` as `OPENAI_COMPAT_IMAGE_API_KEY` (the install prompt
+   offers this). Already have the key under another name? Point at it instead of copying it:
 
-| Environment Variable | Description | Default |
+```bash
+hermes config set plugins.entries.openai-compatible.settings.key_env MY_GATEWAY_KEY
+```
+
+| Setting (`plugins.entries.openai-compatible.settings.*`) | Default | Meaning |
 |---|---|---|
-| `OPENAI_COMPAT_IMAGE_BASE_URL` | Base URL of the OpenAI-compatible API | required |
-| `OPENAI_COMPAT_IMAGE_MODEL` | Model identifier to send in the payload | `gpt-image-2` |
-| `OPENAI_COMPAT_IMAGE_API_KEY` | Bearer API key (if required) | `dummy` |
+| `base_url` | none (required) | Gateway API root, normally ending in `/v1`. HTTPS required except `localhost`. |
+| `key_env` | `OPENAI_COMPAT_IMAGE_API_KEY` | Name of the `.env` variable holding the key. Empty key = keyless local gateway. |
+| `quality` | `medium` | `auto`, `low`, `medium`, `high`, `xhigh` or `max`, sent for GPT image models. |
 
-Remote base URLs must use HTTPS. Plain HTTP is allowed only for local
-development on `localhost`, `127.0.0.1`, or `::1`. Source image URLs must use
-HTTPS, cannot redirect, cannot resolve to private/local addresses, and are
-bounded to 50MB. Credentials must never appear in URLs.
+The model comes from `image_gen.model`. A quality suffix overrides the `quality` setting for that
+model: `gpt-image-2-high` sends `model: gpt-image-2, quality: high`.
 
-## Download trust boundary
+| Model id | Sent as |
+|---|---|
+| `gpt-image-2`, `gpt-image-2.5`, `gpt-image-2.5-flare`, `gpt-image-2.5-sunburst`, `gpt-image-1`, `gpt-image-1.5` | model + `size` from the aspect ratio + `quality` |
+| Any of the above + `-low`/`-medium`/`-high`/`-xhigh`/`-max`/`-auto` | base model + that quality |
+| Anything else (e.g. a Gemini image model your gateway exposes) | model only, verbatim |
 
-Use only an endpoint you trust. When the endpoint returns an image `url`, Hermes
-fetches it from the machine running Hermes and caches the response. Output URLs
-use Hermes' standard image downloader, not this plugin's restricted source-image
-loader. They are not confined to public network destinations; an unsafe endpoint
-response can cause requests to local or private-network services reachable from
-that machine. The downloader is not a network sandbox.
+Aspect ratios map to `1536x1024` (landscape), `1024x1024` (square) and `1024x1536` (portrait).
 
-This trust boundary applies to URL output only. Base64 (`b64_json`) output is
-saved directly and does not cause a separate image-URL download.
+## Gateway notes
 
-## GPT-Image2 scope
+These were measured on live routes; your gateway version may differ, and the gateway remains the
+source of truth for what it accepts.
 
-This plugin provides the basic OpenAI Images API path needed for GPT-Image2
-through a compatible proxy. It sends `model`, `prompt`, `size`, `quality`, and
-`n=1`, then saves `b64_json` output locally. It does not expose native Codex
-`image_gen.imagegen`, partial-image streaming, masks, transparent-background
-fallbacks, or arbitrary provider-specific controls.
+### CLIProxyAPI (CPA)
 
-The configured proxy remains the source of truth for model availability,
-account permissions, billing, request rewriting, and actual option support.
-This repository does not prove OpenAI entitlement or a successful production
-generation.
+- `base_url` is the CPA listener, e.g. `http://127.0.0.1:8317/v1`; the key is a CPA API key.
+- With Codex OAuth accounts, the exact ids `gpt-image-1.5`, `gpt-image-2`, `gpt-image-2.5`,
+  `gpt-image-2.5-flare` and `gpt-image-2.5-sunburst` pass through to ChatGPT's image backend. Other
+  names become a Responses call with an image tool.
+- Codex OAuth renders at roughly medium regardless of the requested quality, and picks its own
+  size (a `2048x2048` request came back `1536x1024`). Compare `requested_*` with `output_size`
+  before paying for higher tiers. Native 2K/4K and `xhigh`/`max` need an API-key route.
+- The returned `model` only echoes the requested name; it does not prove which variant rendered.
+- Gemini image models served by CPA (for example via Antigravity accounts) also work: set their id
+  as `image_gen.model` and they are sent without `size`/`quality`.
+
+### New API
+
+- `base_url` is your New API site root plus `/v1`; the key is a New API token whose group can use
+  the image channel.
+- Enable the image model on a channel whose upstream supports `/v1/images/generations` (and
+  `/v1/images/edits` for editing). A `404` or "model not enabled" error names the gap.
+- Sites behind Cloudflare can block default HTTP client signatures (`403`, error `1010`). The
+  plugin sends its own `User-Agent`; if it is still blocked, allow it in the WAF.
+- Cloudflare cuts requests at about 125 s (`524`) while the upstream keeps rendering and billing.
+  For slow, high-quality renders, point `base_url` at a route that bypasses the CDN.
+
+## Upgrading from 1.x
+
+1.x read everything from environment variables. 2.0 still reads them as a fallback:
+`OPENAI_COMPAT_IMAGE_BASE_URL` is used when `settings.base_url` is unset, and
+`OPENAI_COMPAT_IMAGE_MODEL` when `image_gen.model` is unset. Note that `image_gen.model` now wins
+over `OPENAI_COMPAT_IMAGE_MODEL` (in 1.x the env var won). Move to the settings above and remove the
+old variables when convenient.
+
+## Trust boundary
+
+Use only a gateway you trust. When it returns an image `url` instead of `b64_json`, Hermes
+downloads that URL from the machine running Hermes with its standard image downloader, which is
+not confined to public addresses. Base64 output is saved directly. Source images you pass for
+editing go through this plugin's own restricted loader.
+
+## Development
+
+```bash
+PYTHONPATH=~/.hermes/hermes-agent python -m unittest discover -s tests -v
+hermes plugins doctor . --ci
+hermes plugins validate .
+```
+
+See [CHANGELOG.md](CHANGELOG.md) and [AGENTS.md](AGENTS.md).
 
 ## License
 
