@@ -41,7 +41,7 @@ except ImportError:  # pragma: no cover - older Hermes
 logger = logging.getLogger(__name__)
 
 PLUGIN_NAME = "openai-compatible"
-PLUGIN_VERSION = "2.0.0"
+PLUGIN_VERSION = "2.0.1"
 USER_AGENT = f"hermes-imagegen-openai-compatible/{PLUGIN_VERSION}"
 
 DEFAULT_MODEL = "gpt-image-2"
@@ -66,6 +66,14 @@ SIZES = {"landscape": "1536x1024", "square": "1024x1024", "portrait": "1024x1536
 MAX_SOURCE_IMAGE_BYTES = 50 * 1024 * 1024
 MAX_ERROR_CHARS = 300
 LOCAL_HTTP_HOSTS = {"localhost", "127.0.0.1", "::1"}
+# Plain-HTTP gateways are allowed only when EVERY resolved address is inside these networks:
+# loopback, RFC 1918 LAN / Docker bridges, CGNAT 100.64.0.0/10 (Tailscale), IPv6 ULA (incl.
+# Tailscale fd7a::/48). Deliberately an explicit list, not ``ip.is_private``: that is True for
+# link-local 169.254.0.0/16 (cloud metadata) and False for 100.64.0.0/10.
+PRIVATE_HTTP_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
+    "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
+    "::1/128", "fc00::/7",
+))
 
 
 class SourceImageError(Exception):
@@ -90,14 +98,44 @@ def _resolve_model(selected: str, quality_setting: str) -> Tuple[str, Optional[s
     return selected, None
 
 
+def _is_private_http_address(ip: "ipaddress.IPv4Address | ipaddress.IPv6Address") -> bool:
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return any(ip in net for net in PRIVATE_HTTP_NETWORKS if ip.version == net.version)
+
+
+def _host_is_private(hostname: str) -> bool:
+    """True only if ``hostname`` resolves and every address is in :data:`PRIVATE_HTTP_NETWORKS`."""
+    try:
+        return _is_private_http_address(ipaddress.ip_address(hostname))
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+    except (socket.gaierror, UnicodeError, OSError):
+        return False
+    addresses = set()
+    for info in infos:
+        try:
+            addresses.add(ipaddress.ip_address(str(info[4][0]).split("%", 1)[0]))
+        except ValueError:
+            return False
+    return bool(addresses) and all(_is_private_http_address(ip) for ip in addresses)
+
+
 def _validate_base_url(base_url: str) -> str:
     parsed = urlparse(base_url)
     hostname = (parsed.hostname or "").lower()
     if parsed.username or parsed.password or not parsed.netloc or any(c in base_url for c in "\r\n\t "):
         raise ValueError("base_url must be an absolute URL with no credentials or whitespace")
-    if parsed.scheme == "https" or (parsed.scheme == "http" and hostname in LOCAL_HTTP_HOSTS):
+    if parsed.scheme == "https":
         return base_url.rstrip("/")
-    raise ValueError("base_url must use HTTPS; plain HTTP is allowed only for localhost")
+    if parsed.scheme == "http" and (hostname in LOCAL_HTTP_HOSTS or _host_is_private(hostname)):
+        return base_url.rstrip("/")
+    raise ValueError(
+        "base_url must use HTTPS. Plain HTTP is allowed only when the host resolves exclusively to "
+        "loopback, LAN (10/8, 172.16/12, 192.168/16), Tailscale/CGNAT (100.64/10) or IPv6 ULA "
+        "addresses, so the key never crosses the public internet in cleartext")
 
 
 # --------------------------------------------------------------------------- source images

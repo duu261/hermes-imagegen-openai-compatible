@@ -56,7 +56,7 @@ hermes config set plugins.entries.openai-compatible.settings.key_env MY_GATEWAY_
 
 | Setting (`plugins.entries.openai-compatible.settings.*`) | Default | Meaning |
 |---|---|---|
-| `base_url` | none (required) | Gateway API root, normally ending in `/v1`. HTTPS required except `localhost`. |
+| `base_url` | none (required) | Gateway API root, normally ending in `/v1`. HTTPS, or plain HTTP to a private address (see below). |
 | `key_env` | `OPENAI_COMPAT_IMAGE_API_KEY` | Name of the `.env` variable holding the key. Empty key = keyless local gateway. |
 | `quality` | `medium` | `auto`, `low`, `medium`, `high`, `xhigh` or `max`, sent for GPT image models. |
 
@@ -70,6 +70,21 @@ model: `gpt-image-2-high` sends `model: gpt-image-2, quality: high`.
 | Anything else (e.g. a Gemini image model your gateway exposes) | model only, verbatim |
 
 Aspect ratios map to `1536x1024` (landscape), `1024x1024` (square) and `1024x1536` (portrait).
+
+### Plain HTTP for self-hosted gateways
+
+The key is sent as a bearer header, so `base_url` must be HTTPS unless the gateway is reachable
+only over a private network. Plain `http://` is accepted when the host resolves **exclusively** to:
+
+| Network | Typical use |
+|---|---|
+| `127.0.0.0/8`, `::1` | CPA on the same machine |
+| `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` | LAN, Docker service names (`http://cpa:8317/v1`) |
+| `100.64.0.0/10`, `fc00::/7` | Tailscale / CGNAT, IPv6 ULA |
+
+Anything else is refused: public addresses, link-local `169.254.0.0/16` (cloud metadata),
+hostnames that fail to resolve, and hostnames where even one resolved address is public. The check
+runs when each request is prepared, against the addresses the host resolves to at that moment.
 
 ## Gateway notes
 
