@@ -416,7 +416,8 @@ class OpenAICompatibleImageGenProvider(ImageGenProvider):
         except openai.APIConnectionError:
             return fail(f"Could not connect to the gateway at {base_url}", "connection_error")
         except Exception as exc:  # noqa: BLE001 - surface the category, never raw config
-            logger.debug("%s image request failed", PLUGIN_NAME, exc_info=True)
+            # No exc_info: header/URL errors can carry the key in their traceback.
+            logger.debug("%s image request failed: %s", PLUGIN_NAME, type(exc).__name__)
             return fail(f"Image request failed ({type(exc).__name__}): {_redact(str(exc), secrets)}", "api_error")
 
         data = getattr(response, "data", None) or []

@@ -12,7 +12,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Check out plugin
         uses: actions/checkout@v4
@@ -27,7 +27,8 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          # Hermes declares its runtime dependencies only for Python 3.14.
+          python-version: "3.14"
 
       - name: Install Hermes Agent and plugin dependency
         run: |
