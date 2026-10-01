@@ -1,19 +1,32 @@
 name: openai-compatible
-version: 1.1.1
-description: OpenAI Images-compatible Hermes backend for GPT-Image2 and trusted reverse proxies
-author: Duu
+version: 2.0.0
+manifest_version: 2
+description: GPT Image through CLIProxyAPI, New API, or any OpenAI Images-compatible gateway
+author: duu261
+license: MIT
+homepage: https://github.com/duu261/hermes-imagegen-openai-compatible
+tags: [image-generation, cliproxyapi, new-api, gpt-image]
 kind: backend
-provides_image_gen_providers:
-  - openai-compatible
 python_dependencies:
   - "openai>=2.0,<3"
+config_schema:
+  base_url:
+    type: str
+    default: ""
+    label: Gateway base URL
+    description: "API root of the gateway, e.g. http://127.0.0.1:8317/v1 (CLIProxyAPI) or https://newapi.example/v1. HTTPS required except localhost."
+  key_env:
+    type: str
+    default: OPENAI_COMPAT_IMAGE_API_KEY
+    label: Key variable
+    description: "Name of the .env variable holding the gateway key. Point it at a key you already have instead of copying it."
+  quality:
+    type: str
+    default: medium
+    choices: [auto, low, medium, high, xhigh, max]
+    description: "Quality sent for GPT image models. Codex-backed gateways may ignore it."
 requires_env:
-  - name: OPENAI_COMPAT_IMAGE_BASE_URL
-    description: "HTTPS base URL for the OpenAI-compatible image endpoint"
-  - name: OPENAI_COMPAT_IMAGE_MODEL
-    description: "Image model ID, normally gpt-image-2"
-    optional: true
   - name: OPENAI_COMPAT_IMAGE_API_KEY
-    description: "API key for the endpoint; optional for local unauthenticated servers"
+    description: "Gateway API key (default key variable; leave empty for keyless local gateways)"
     secret: true
     optional: true

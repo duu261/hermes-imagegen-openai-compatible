@@ -1,12 +1,13 @@
 import base64
 import importlib.util
 import os
+import struct
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("image_provider", ROOT / "__init__.py")
@@ -14,140 +15,266 @@ provider = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = provider
 spec.loader.exec_module(provider)
 
+PNG_1536x1024 = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + struct.pack(">II", 1536, 1024) + b"\x08\x06\x00\x00\x00"
+
+
+class FakeAPIStatusError(Exception):
+    def __init__(self, status_code, body=None, text=""):
+        super().__init__(text)
+        self.status_code = status_code
+        self.body = body
+        self.response = types.SimpleNamespace(text=text)
+
+
+class FakeAPIConnectionError(Exception):
+    pass
+
+
+class FakeAPITimeoutError(FakeAPIConnectionError):
+    pass
+
 
 class FakeImage:
-    b64_json = base64.b64encode(b"fake-image").decode()
+    b64_json = base64.b64encode(PNG_1536x1024).decode()
     url = None
     revised_prompt = None
 
 
 class FakeImages:
-    def __init__(self):
+    def __init__(self, raise_exc=None):
         self.generate_calls = []
         self.edit_calls = []
+        self.raise_exc = raise_exc
+
+    def _respond(self):
+        if self.raise_exc is not None:
+            raise self.raise_exc
+        return types.SimpleNamespace(data=[FakeImage()])
 
     def generate(self, **kwargs):
         self.generate_calls.append(kwargs)
-        return types.SimpleNamespace(data=[FakeImage()])
+        return self._respond()
 
     def edit(self, **kwargs):
         self.edit_calls.append(kwargs)
-        return types.SimpleNamespace(data=[FakeImage()])
+        return self._respond()
 
 
 class FakeClient:
     instances = []
+    raise_exc: "Exception | None" = None
 
-    def __init__(self, *, base_url, api_key):
+    def __init__(self, *, base_url, api_key, default_headers=None):
         self.base_url = base_url
         self.api_key = api_key
-        self.images = FakeImages()
+        self.default_headers = default_headers or {}
+        self.images = FakeImages(self.__class__.raise_exc)
         self.__class__.instances.append(self)
+
+
+class Ctx:
+    def __init__(self, settings=None):
+        self.settings = settings or {}
+        self.registered = []
+
+    def get_config(self, key, default=None):
+        return self.settings.get(key, default)
+
+    def register_image_gen_provider(self, item):
+        self.registered.append(item)
 
 
 class ProviderTests(unittest.TestCase):
     def setUp(self):
         FakeClient.instances.clear()
-        self.env = patch.dict(os.environ, {
-            "OPENAI_COMPAT_IMAGE_BASE_URL": "https://gateway.example/v1",
-            "OPENAI_COMPAT_IMAGE_MODEL": "gpt-image-2",
-            "OPENAI_COMPAT_IMAGE_API_KEY": "test-key",
-        }, clear=True)
+        FakeClient.raise_exc = None
+        self.tmp = tempfile.TemporaryDirectory()
+        self.saved_path = Path(self.tmp.name) / "out.png"
+        self.saved_path.write_bytes(PNG_1536x1024)
+        self.env = patch.dict(os.environ, {"OPENAI_COMPAT_IMAGE_API_KEY": "test-key-123456"}, clear=True)
         self.env.start()
-        self.openai = patch.dict(sys.modules, {"openai": types.SimpleNamespace(OpenAI=FakeClient)})
+        fake_openai = types.SimpleNamespace(
+            OpenAI=FakeClient, APIStatusError=FakeAPIStatusError,
+            APIConnectionError=FakeAPIConnectionError, APITimeoutError=FakeAPITimeoutError)
+        self.openai = patch.dict(sys.modules, {"openai": fake_openai})
         self.openai.start()
-        self.saved = patch.object(provider, "save_b64_image", return_value=Path("/tmp/fake-image.png"))
+        self.saved = patch.object(provider, "save_b64_image", return_value=self.saved_path)
         self.saved.start()
 
     def tearDown(self):
         self.saved.stop()
         self.openai.stop()
         self.env.stop()
+        self.tmp.cleanup()
 
-    def test_is_available_requires_explicit_endpoint(self):
-        self.assertTrue(provider.OpenAICompatibleImageGenProvider().is_available())
-        with patch.dict(os.environ, {"OPENAI_COMPAT_IMAGE_BASE_URL": ""}, clear=False):
-            self.assertFalse(provider.OpenAICompatibleImageGenProvider().is_available())
+    def make(self, **settings):
+        settings.setdefault("base_url", "https://gateway.example/v1")
+        return provider.OpenAICompatibleImageGenProvider(Ctx(settings))
 
-    def test_gpt_image_2_generation_maps_aspect_ratio_and_quality(self):
-        result = provider.OpenAICompatibleImageGenProvider().generate(
-            "draw a test",
-            aspect_ratio="landscape",
-        )
-        self.assertTrue(result["success"])
-        self.assertEqual(result["model"], "gpt-image-2")
-        call = FakeClient.instances[0].images.generate_calls[0]
-        self.assertEqual(call["model"], "gpt-image-2")
-        self.assertEqual(call["size"], "1536x1024")
-        self.assertEqual(call["quality"], "medium")
-        self.assertEqual(call["n"], 1)
+    def call(self, client_index=0, kind="generate_calls"):
+        return getattr(FakeClient.instances[client_index].images, kind)[0]
 
-    def test_gpt_image_2_quality_tier_uses_api_model(self):
-        with patch.dict(os.environ, {"OPENAI_COMPAT_IMAGE_MODEL": "gpt-image-2-high"}, clear=False):
-            result = provider.OpenAICompatibleImageGenProvider().generate("draw a test", "square")
-        self.assertTrue(result["success"])
-        self.assertEqual(result["model"], "gpt-image-2-high")
-        call = FakeClient.instances[0].images.generate_calls[0]
-        self.assertEqual(call["model"], "gpt-image-2")
-        self.assertEqual(call["quality"], "high")
-        self.assertEqual(call["size"], "1024x1024")
+    # -- configuration ---------------------------------------------------------------
 
-    def test_gpt_image_2_5_models_default_to_medium_quality(self):
-        for model in ("gpt-image-2.5", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst"):
-            FakeClient.instances.clear()
-            with patch.dict(os.environ, {"OPENAI_COMPAT_IMAGE_MODEL": model}, clear=False):
-                result = provider.OpenAICompatibleImageGenProvider().generate("draw a test", "portrait")
-            self.assertTrue(result["success"], model)
-            call = FakeClient.instances[0].images.generate_calls[0]
-            self.assertEqual(call["model"], model)
-            self.assertEqual(call["quality"], "medium")
-            self.assertEqual(call["size"], "1024x1536")
+    def test_settings_base_url_and_default_key_env(self):
+        result = self.make().generate("draw", "landscape", model="gpt-image-2")
+        self.assertTrue(result["success"], result)
+        client = FakeClient.instances[0]
+        self.assertEqual(client.base_url, "https://gateway.example/v1")
+        self.assertEqual(client.api_key, "test-key-123456")
+        self.assertEqual(client.default_headers["User-Agent"], provider.USER_AGENT)
 
-    def test_unknown_model_sends_no_size_or_quality(self):
-        with patch.dict(os.environ, {"OPENAI_COMPAT_IMAGE_MODEL": "custom-image-model"}, clear=False):
-            result = provider.OpenAICompatibleImageGenProvider().generate("draw a test", "square")
-        self.assertTrue(result["success"])
-        call = FakeClient.instances[0].images.generate_calls[0]
-        self.assertNotIn("quality", call)
-        self.assertNotIn("size", call)
+    def test_key_env_points_at_another_variable(self):
+        with patch.dict(os.environ, {"MY_GATEWAY_KEY": "other-key-abcdef"}):
+            self.make(key_env="MY_GATEWAY_KEY").generate("draw", model="gpt-image-2")
+        self.assertEqual(FakeClient.instances[0].api_key, "other-key-abcdef")
 
-    def test_gpt_image_2_edit_uses_multipart_input_and_size(self):
-        source = "data:image/png;base64," + base64.b64encode(b"source").decode()
-        result = provider.OpenAICompatibleImageGenProvider().generate(
-            "edit a test",
-            aspect_ratio="portrait",
-            image_url=source,
-        )
-        self.assertTrue(result["success"])
-        call = FakeClient.instances[0].images.edit_calls[0]
-        self.assertEqual(call["model"], "gpt-image-2")
-        self.assertEqual(call["size"], "1024x1536")
-        self.assertEqual(call["quality"], "medium")
-        self.assertEqual(call["n"], 1)
-        self.assertEqual(len(call["image"].read()), len(b"source"))
+    def test_legacy_env_base_url_still_works(self):
+        with patch.dict(os.environ, {"OPENAI_COMPAT_IMAGE_BASE_URL": "https://legacy.example/v1"}):
+            p = provider.OpenAICompatibleImageGenProvider(Ctx())
+            self.assertTrue(p.is_available())
+            self.assertTrue(p.generate("draw", model="gpt-image-2")["success"])
+        self.assertEqual(FakeClient.instances[0].base_url, "https://legacy.example/v1")
 
-    def test_remote_base_url_must_use_https(self):
-        with patch.dict(os.environ, {"OPENAI_COMPAT_IMAGE_BASE_URL": "http://gateway.example/v1"}, clear=False):
-            result = provider.OpenAICompatibleImageGenProvider().generate("draw a test")
-        self.assertFalse(result["success"])
+    def test_unconfigured_is_unavailable_with_actionable_error(self):
+        p = provider.OpenAICompatibleImageGenProvider(Ctx())
+        self.assertFalse(p.is_available())
+        result = p.generate("draw")
         self.assertEqual(result["error_type"], "configuration_error")
-        self.assertIn("HTTPS", result["error"])
+        self.assertIn("plugins.entries.openai-compatible.settings.base_url", result["error"])
 
-    def test_source_data_url_rejects_invalid_base64(self):
-        with self.assertRaisesRegex(ValueError, "invalid base64"):
-            provider._load_image_bytes("data:image/png;base64,not-valid!")
+    def test_remote_http_rejected_localhost_allowed(self):
+        result = self.make(base_url="http://gateway.example/v1").generate("draw")
+        self.assertEqual(result["error_type"], "configuration_error")
+        self.assertTrue(self.make(base_url="http://127.0.0.1:8317/v1").generate("draw")["success"])
 
-    def test_registers_image_generation_provider(self):
-        seen = []
+    def test_key_with_newline_rejected_without_echo(self):
+        with patch.dict(os.environ, {"OPENAI_COMPAT_IMAGE_API_KEY": "secret-value\ninjected: header"}):
+            result = self.make().generate("draw")
+        self.assertEqual(result["error_type"], "configuration_error")
+        self.assertNotIn("secret-value", result["error"])
 
-        class Context:
-            def register_image_gen_provider(self, item):
-                seen.append(item)
+    # -- model and quality mapping ---------------------------------------------------
 
-        provider.register(Context())
-        self.assertEqual(len(seen), 1)
-        self.assertEqual(seen[0].name, "openai-compatible")
-        self.assertEqual(seen[0].capabilities()["max_reference_images"], 16)
+    def test_gpt_image_default_quality_and_size(self):
+        self.make().generate("draw", "landscape", model="gpt-image-2")
+        call = self.call()
+        self.assertEqual((call["model"], call["size"], call["quality"], call["n"]),
+                         ("gpt-image-2", "1536x1024", "medium", 1))
+
+    def test_quality_setting_and_suffix(self):
+        self.make(quality="high").generate("draw", "square", model="gpt-image-2.5-sunburst")
+        self.assertEqual(self.call()["quality"], "high")
+        FakeClient.instances.clear()
+        result = self.make().generate("draw", "portrait", model="gpt-image-2.5-flare-max")
+        call = self.call()
+        self.assertEqual((call["model"], call["quality"], call["size"]), ("gpt-image-2.5-flare", "max", "1024x1536"))
+        self.assertEqual(result["model"], "gpt-image-2.5-flare-max")
+
+    def test_unknown_quality_setting_falls_back_to_medium(self):
+        self.make(quality="ultra").generate("draw", model="gpt-image-2")
+        self.assertEqual(self.call()["quality"], "medium")
+
+    def test_gateway_defined_model_sent_verbatim_without_size_or_quality(self):
+        self.make().generate("draw", model="gemini-3.1-flash-image")
+        call = self.call()
+        self.assertEqual(call["model"], "gemini-3.1-flash-image")
+        self.assertNotIn("size", call)
+        self.assertNotIn("quality", call)
+
+    def test_legacy_model_env_used_when_hermes_passes_none(self):
+        with patch.dict(os.environ, {"OPENAI_COMPAT_IMAGE_MODEL": "gpt-image-2.5-flare"}):
+            self.make().generate("draw")
+        self.assertEqual(self.call()["model"], "gpt-image-2.5-flare")
+
+    def test_image_gen_model_beats_legacy_env(self):
+        with patch.dict(os.environ, {"OPENAI_COMPAT_IMAGE_MODEL": "gpt-image-2.5-flare"}):
+            self.make().generate("draw", model="gpt-image-2")
+        self.assertEqual(self.call()["model"], "gpt-image-2")
+
+    # -- results ---------------------------------------------------------------------
+
+    def test_success_reports_requested_and_output_size(self):
+        result = self.make().generate("draw", "square", model="gpt-image-2")
+        self.assertEqual(result["requested_size"], "1024x1024")
+        self.assertEqual(result["requested_quality"], "medium")
+        self.assertEqual(result["output_size"], "1536x1024")
+        self.assertEqual(result["api_model"], "gpt-image-2")
+
+    def test_edit_uses_multipart_sources(self):
+        source = "data:image/png;base64," + base64.b64encode(b"source").decode()
+        result = self.make().generate("edit", "portrait", image_url=source, model="gpt-image-2")
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["modality"], "image")
+        call = self.call(kind="edit_calls")
+        self.assertEqual(call["image"].read(), b"source")
+
+    # -- errors ----------------------------------------------------------------------
+
+    def test_missing_local_source_is_io_error_before_any_request(self):
+        result = self.make().generate("edit", image_url="/nonexistent/cache/image.png")
+        self.assertEqual(result["error_type"], "io_error")
+        self.assertIn("/nonexistent/cache/image.png", result["error"])
+        self.assertIn("pruned", result["error"])
+        self.assertEqual(FakeClient.instances, [])
+
+    def test_invalid_data_url_is_io_error(self):
+        result = self.make().generate("edit", image_url="data:image/png;base64,not-valid!")
+        self.assertEqual(result["error_type"], "io_error")
+
+    def test_http_error_passes_status_and_message(self):
+        FakeClient.raise_exc = FakeAPIStatusError(
+            400, {"error": {"message": "model gpt-image-9 is not enabled on this channel"}})
+        result = self.make().generate("draw", model="gpt-image-2")
+        self.assertEqual(result["error_type"], "api_error")
+        self.assertIn("HTTP 400", result["error"])
+        self.assertIn("not enabled on this channel", result["error"])
+
+    def test_auth_error_redacts_key(self):
+        FakeClient.raise_exc = FakeAPIStatusError(
+            401, {"error": {"message": "invalid token test-key-123456 Bearer abc.def"}})
+        result = self.make().generate("draw")
+        self.assertEqual(result["error_type"], "auth_error")
+        self.assertNotIn("test-key-123456", result["error"])
+        self.assertNotIn("abc.def", result["error"])
+
+    def test_cloudflare_1010_hint(self):
+        FakeClient.raise_exc = FakeAPIStatusError(403, None, "error code: 1010")
+        result = self.make().generate("draw")
+        self.assertIn("Cloudflare", result["error"])
+
+    def test_connection_and_timeout_errors(self):
+        FakeClient.raise_exc = FakeAPITimeoutError()
+        self.assertEqual(self.make().generate("draw")["error_type"], "timeout")
+        FakeClient.raise_exc = FakeAPIConnectionError()
+        self.assertEqual(self.make().generate("draw")["error_type"], "connection_error")
+
+    def test_empty_prompt(self):
+        self.assertEqual(self.make().generate("  ")["error_type"], "invalid_argument")
+
+    # -- helpers and registration ----------------------------------------------------
+
+    def test_image_dims_png_and_jpeg(self):
+        self.assertEqual(provider._image_dims(PNG_1536x1024), "1536x1024")
+        jpeg = b"\xff\xd8" + b"\xff\xc0\x00\x11\x08" + struct.pack(">HH", 768, 1254) + b"\x00" * 8
+        self.assertEqual(provider._image_dims(jpeg), "1254x768")
+        self.assertIsNone(provider._image_dims(b"not an image"))
+
+    def test_registers_provider_with_ctx(self):
+        ctx = Ctx({"base_url": "https://gateway.example/v1"})
+        provider.register(ctx)
+        self.assertEqual(len(ctx.registered), 1)
+        item = ctx.registered[0]
+        self.assertEqual(item.name, "openai-compatible")
+        self.assertEqual(item.capabilities()["max_reference_images"], 16)
+        self.assertTrue(item.is_available())
+
+    def test_user_agent_tracks_manifest_version(self):
+        manifest = (ROOT / "plugin.yaml").read_text(encoding="utf-8")
+        version = next(line.split(":", 1)[1].strip() for line in manifest.splitlines()
+                       if line.startswith("version:"))
+        self.assertEqual(version, provider.PLUGIN_VERSION)
+        self.assertTrue(provider.USER_AGENT.endswith("/" + version))
 
 
 if __name__ == "__main__":

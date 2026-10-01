@@ -1,12 +1,16 @@
-### OpenAI-Compatible Image Generation Plugin Installed
+### openai-compatible installed
 
-To activate this provider in Hermes:
+GPT Image through CLIProxyAPI, New API, or another OpenAI Images gateway.
 
 ```bash
+hermes plugins enable openai-compatible
 hermes config set image_gen.provider openai-compatible
+hermes config set image_gen.model gpt-image-2
+hermes config set plugins.entries.openai-compatible.settings.base_url https://<your-gateway>/v1
 ```
 
-Configure your endpoint in `~/.hermes/.env`:
-- `OPENAI_COMPAT_IMAGE_BASE_URL` (required; use HTTPS for remote endpoints)
-- `OPENAI_COMPAT_IMAGE_MODEL` (default: `gpt-image-2`)
-- `OPENAI_COMPAT_IMAGE_API_KEY` (optional)
+The gateway key goes in `~/.hermes/.env` as `OPENAI_COMPAT_IMAGE_API_KEY`, or point
+`plugins.entries.openai-compatible.settings.key_env` at a variable you already have.
+
+Restart a running gateway (`hermes gateway restart`) to load it. Gateway notes and all settings:
+https://github.com/duu261/hermes-imagegen-openai-compatible#readme
