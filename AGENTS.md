@@ -37,11 +37,16 @@ live in `README.md`; keep this file about how to change the plugin safely.
   status and redacted upstream message. Never collapse everything into one generic `api_error`
   with the cause logged only at debug level; that made the calling model retry blindly.
 - **Public Hermes surface only.** Import from `agent.image_gen_provider`, `agent.secret_scope`
-  (with the plain-env fallback) and `agent.file_safety`. Do not import bundled plugin helpers
+  (with the plain-env fallback), `agent.file_safety` and `tools.url_safety` (the same SSRF guard
+  the bundled image providers use). Do not import bundled plugin helpers
   (`plugins.image_gen._common`) or other Hermes internals; they move between releases.
-- **Keep the stricter source-image loader** (HTTPS only, no redirects, private addresses refused,
-  50 MB cap). Output URLs returned by the gateway use Hermes' downloader; that trust boundary is
-  documented in the README, not silently widened.
+- **Keep the stricter source-image loader** (HTTPS only, `tools.url_safety.is_safe_url` plus
+  `create_ssrf_safe_client(follow_redirects=False)`, image magic bytes required, 50 MB cap). Never
+  hand-roll an address check again: `ip.is_private` misses CGNAT `100.64.0.0/10`, which let
+  Tailscale hosts through in 2.0.1. Output URLs returned by the gateway use Hermes' downloader; that
+  trust boundary is documented in the README, not silently widened.
+- **No OpenAI account ids to gateways.** The `openai` SDK reads `OPENAI_ORG_ID` /
+  `OPENAI_PROJECT_ID` from the environment; the client sets those headers to `openai.Omit()`.
 - **Plain-HTTP gateway scope is fixed.** `http://` base URLs are allowed only when every resolved
   address is in `PRIVATE_HTTP_NETWORKS` (loopback, RFC 1918, `100.64.0.0/10`, ULA). Keep it an
   explicit list: never switch to `ip.is_private` (it admits link-local metadata and misses
