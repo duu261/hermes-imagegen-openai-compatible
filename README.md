@@ -24,7 +24,9 @@ Use this plugin when your images go through CPA or New API:
 - **Gateway-defined models.** Any model id the gateway serves (for example a Gemini image model
   behind CPA) is sent verbatim, without the GPT-only `size` and `quality` fields that such
   channels reject.
-- **Stricter source-image loading.** HTTPS only, no redirects, private addresses refused, 50 MB cap.
+- **Stricter source-image loading.** HTTPS only through Hermes' SSRF guard (private, CGNAT and
+  link-local hosts refused, connect-time IP pinning), no redirects, image magic bytes required,
+  50 MB cap.
 
 ## Install
 

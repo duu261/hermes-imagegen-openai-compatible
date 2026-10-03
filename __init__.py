@@ -15,8 +15,6 @@ import os
 import re
 import socket
 import struct
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -41,7 +39,7 @@ except ImportError:  # pragma: no cover - older Hermes
 logger = logging.getLogger(__name__)
 
 PLUGIN_NAME = "openai-compatible"
-PLUGIN_VERSION = "2.0.1"
+PLUGIN_VERSION = "2.0.2"
 USER_AGENT = f"hermes-imagegen-openai-compatible/{PLUGIN_VERSION}"
 
 DEFAULT_MODEL = "gpt-image-2"
@@ -141,23 +139,44 @@ def _validate_base_url(base_url: str) -> str:
 # --------------------------------------------------------------------------- source images
 
 
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
+def _require_image(data: bytes, where: str) -> bytes:
+    """Refuse bytes that are not PNG, JPEG, WebP or GIF, so arbitrary files never reach the gateway."""
+    if (data.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a"))
+            or (data[:4] == b"RIFF" and data[8:12] == b"WEBP")):
+        return data
+    raise SourceImageError(f"source is not a PNG, JPEG, WebP or GIF image: {where}")
 
 
-def _reject_private_host(hostname: str) -> None:
+def _fetch_image_url(ref: str) -> bytes:
+    """GET an HTTPS source image through Hermes' SSRF guard: every resolved address must be public
+    (CGNAT/Tailscale included in the refusal), the vetted IP is pinned at connect time, and
+    redirects are not followed."""
+    import httpx
+    from tools.url_safety import SSRFConnectionBlocked, create_ssrf_safe_client, is_safe_url
+
+    if not is_safe_url(ref):
+        raise SourceImageError("source image host resolves to a private, local or unresolvable address")
+    headers = {"Accept": "image/*", "User-Agent": USER_AGENT}
     try:
-        addresses = socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
-    except socket.gaierror:
-        raise SourceImageError(f"could not resolve source image host {hostname!r}") from None
-    for address in addresses:
-        try:
-            ip = ipaddress.ip_address(address[4][0])
-        except ValueError:
-            continue
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
-            raise SourceImageError("source image host resolves to a private or local address")
+        with create_ssrf_safe_client(timeout=60, follow_redirects=False, headers=headers) as client:
+            with client.stream("GET", ref) as response:
+                if response.is_redirect:
+                    raise SourceImageError("source image URL redirected; pass the final image URL")
+                if not response.is_success:
+                    raise SourceImageError(f"source image URL returned HTTP {response.status_code}")
+                content_type = (response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+                if not content_type.startswith("image/"):
+                    raise SourceImageError("source URL did not return an image")
+                data = bytearray()
+                for chunk in response.iter_bytes():
+                    data += chunk
+                    if len(data) > MAX_SOURCE_IMAGE_BYTES:
+                        raise SourceImageError("source image exceeds the 50MB limit")
+    except SSRFConnectionBlocked:
+        raise SourceImageError("source image host resolves to a private, local or unresolvable address") from None
+    except httpx.HTTPError:
+        raise SourceImageError("could not reach source image URL") from None
+    return bytes(data)
 
 
 def _load_image_bytes(ref: str) -> Tuple[bytes, str]:
@@ -168,22 +187,7 @@ def _load_image_bytes(ref: str) -> Tuple[bytes, str]:
         parsed = urlparse(ref)
         if parsed.scheme != "https" or parsed.username or parsed.password or not parsed.hostname:
             raise SourceImageError("source image URLs must use HTTPS without embedded credentials")
-        _reject_private_host(parsed.hostname)
-        request = urllib.request.Request(
-            ref, headers={"Accept": "image/*", "User-Agent": USER_AGENT}, method="GET")
-        opener = urllib.request.build_opener(_NoRedirectHandler())
-        try:
-            with opener.open(request, timeout=60) as response:
-                content_type = (response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
-                if not content_type.startswith("image/"):
-                    raise SourceImageError("source URL did not return an image")
-                data = response.read(MAX_SOURCE_IMAGE_BYTES + 1)
-        except urllib.error.HTTPError as exc:
-            raise SourceImageError(f"source image URL returned HTTP {exc.code}") from None
-        except (urllib.error.URLError, TimeoutError, socket.timeout):
-            raise SourceImageError("could not reach source image URL") from None
-        if len(data) > MAX_SOURCE_IMAGE_BYTES:
-            raise SourceImageError("source image exceeds the 50MB limit")
+        data = _require_image(_fetch_image_url(ref), "source URL")
         return data, Path(parsed.path).name or "image.png"
     if lower.startswith("data:"):
         header, separator, b64 = ref.partition(",")
@@ -196,7 +200,7 @@ def _load_image_bytes(ref: str) -> Tuple[bytes, str]:
             raise SourceImageError("source data URL contains invalid base64") from None
         if len(data) > MAX_SOURCE_IMAGE_BYTES:
             raise SourceImageError("source image exceeds the 50MB limit")
-        return data, f"image.{ext}"
+        return _require_image(data, "data URL"), f"image.{ext}"
 
     from agent.file_safety import raise_if_read_blocked
 
@@ -219,7 +223,7 @@ def _load_image_bytes(ref: str) -> Tuple[bytes, str]:
         raise SourceImageError(f"source image read refused: {ref} ({type(exc).__name__})") from None
     if len(data) > MAX_SOURCE_IMAGE_BYTES:
         raise SourceImageError("source image exceeds the 50MB limit")
-    return data, os.path.basename(ref) or "image.png"
+    return _require_image(data, ref), os.path.basename(ref) or "image.png"
 
 
 def _named_file(ref: str) -> io.BytesIO:
@@ -440,9 +444,12 @@ class OpenAICompatibleImageGenProvider(ImageGenProvider):
 
         secrets = [api_key]
         try:
+            # The SDK fills organization/project from OPENAI_ORG_ID / OPENAI_PROJECT_ID even when
+            # passed None; Omit() headers are what keep those OpenAI ids away from a third party.
             client = openai.OpenAI(
                 base_url=base_url, api_key=api_key or "not-needed",
-                default_headers={"User-Agent": USER_AGENT},
+                default_headers={"User-Agent": USER_AGENT, "OpenAI-Organization": openai.Omit(),
+                                 "OpenAI-Project": openai.Omit()},
             )
             call = client.images.edit if is_edit else client.images.generate
             response = call(**request)

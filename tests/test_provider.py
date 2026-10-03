@@ -18,6 +18,23 @@ spec.loader.exec_module(provider)
 PNG_1536x1024 = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + struct.pack(">II", 1536, 1024) + b"\x08\x06\x00\x00\x00"
 
 
+def fake_addrinfo(*addresses):
+    def resolve(host, port=None, *args, **kwargs):
+        return [(2 if ":" not in a else 10, 1, 6, "", (a, port or 0)) for a in addresses]
+    return resolve
+
+
+def mock_ssrf_client(handler):
+    """``create_ssrf_safe_client`` stand-in that serves ``handler`` and records the client kwargs."""
+    import httpx
+    seen = {}
+
+    def factory(**kwargs):
+        seen.update(kwargs)
+        return httpx.Client(transport=httpx.MockTransport(handler), **kwargs)
+    return factory, seen
+
+
 class FakeAPIStatusError(Exception):
     def __init__(self, status_code, body=None, text=""):
         super().__init__(text)
@@ -31,6 +48,10 @@ class FakeAPIConnectionError(Exception):
 
 
 class FakeAPITimeoutError(FakeAPIConnectionError):
+    pass
+
+
+class FakeOmit:
     pass
 
 
@@ -91,10 +112,11 @@ class ProviderTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.saved_path = Path(self.tmp.name) / "out.png"
         self.saved_path.write_bytes(PNG_1536x1024)
-        self.env = patch.dict(os.environ, {"OPENAI_COMPAT_IMAGE_API_KEY": "test-key-123456"}, clear=True)
+        self.env = patch.dict(os.environ, {"OPENAI_COMPAT_IMAGE_API_KEY": "test-key-123456",
+                                           "HERMES_ALLOW_PRIVATE_URLS": "false"}, clear=True)
         self.env.start()
         fake_openai = types.SimpleNamespace(
-            OpenAI=FakeClient, APIStatusError=FakeAPIStatusError,
+            OpenAI=FakeClient, APIStatusError=FakeAPIStatusError, Omit=FakeOmit,
             APIConnectionError=FakeAPIConnectionError, APITimeoutError=FakeAPITimeoutError)
         self.openai = patch.dict(sys.modules, {"openai": fake_openai})
         self.openai.start()
@@ -236,12 +258,128 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(result["api_model"], "gpt-image-2")
 
     def test_edit_uses_multipart_sources(self):
-        source = "data:image/png;base64," + base64.b64encode(b"source").decode()
+        source = "data:image/png;base64," + base64.b64encode(PNG_1536x1024).decode()
         result = self.make().generate("edit", "portrait", image_url=source, model="gpt-image-2")
         self.assertTrue(result["success"], result)
         self.assertEqual(result["modality"], "image")
         call = self.call(kind="edit_calls")
-        self.assertEqual(call["image"].read(), b"source")
+        self.assertEqual(call["image"].read(), PNG_1536x1024)
+
+    def test_openai_org_and_project_env_never_sent_to_gateway(self):
+        with patch.dict(os.environ, {"OPENAI_ORG_ID": "org-x", "OPENAI_PROJECT_ID": "proj-x"}):
+            self.make().generate("draw", model="gpt-image-2")
+        headers = FakeClient.instances[0].default_headers
+        self.assertIsInstance(headers["OpenAI-Organization"], FakeOmit)
+        self.assertIsInstance(headers["OpenAI-Project"], FakeOmit)
+
+    # -- source images ---------------------------------------------------------------
+
+    def test_non_image_local_source_refused_before_any_request(self):
+        path = Path(self.tmp.name) / "notes.png"
+        path.write_bytes(b"api_key = not-an-image\n")
+        result = self.make().generate("edit", image_url=str(path), model="gpt-image-2")
+        self.assertEqual(result["error_type"], "io_error")
+        self.assertIn("not a PNG, JPEG, WebP or GIF", result["error"])
+        self.assertEqual(FakeClient.instances, [])
+
+    def test_image_magic_bytes_accepted(self):
+        webp = b"RIFF\x00\x00\x00\x00WEBPVP8 "
+        for data in (PNG_1536x1024, b"\xff\xd8\xff\xe0jfif", b"GIF89a....", webp):
+            self.assertEqual(provider._require_image(data, "x"), data)
+        for data in (b"", b"%PDF-1.7", b"RIFF\x00\x00\x00\x00WAVE"):
+            with self.assertRaises(provider.SourceImageError):
+                provider._require_image(data, "x")
+
+    def test_non_image_data_url_refused(self):
+        source = "data:image/png;base64," + base64.b64encode(b"#!/bin/sh\n").decode()
+        result = self.make().generate("edit", image_url=source)
+        self.assertEqual(result["error_type"], "io_error")
+        self.assertEqual(FakeClient.instances, [])
+
+    def test_source_url_refused_for_cgnat_tailscale_private_and_metadata(self):
+        import tools.url_safety as url_safety
+        for address in ("100.100.1.2", "100.64.0.1", "10.0.0.5", "127.0.0.1", "169.254.169.254",
+                        "fd7a:115c:a1e0::1", "::ffff:100.100.1.2"):
+            with patch.object(url_safety, "_getaddrinfo", fake_addrinfo(address)), \
+                    patch.object(url_safety, "create_ssrf_safe_client",
+                                 side_effect=AssertionError("must not connect")):
+                result = self.make().generate("edit", image_url="https://box.tailnet.ts.net/a.png")
+            self.assertEqual(result["error_type"], "io_error", address)
+            self.assertIn("private", result["error"], address)
+        self.assertEqual(FakeClient.instances, [])
+
+    def test_source_url_mixed_public_and_cgnat_answer_refused(self):
+        import tools.url_safety as url_safety
+        with patch.object(url_safety, "_getaddrinfo", fake_addrinfo("93.184.216.34", "100.101.0.7")):
+            result = self.make().generate("edit", image_url="https://mixed.example/a.png")
+        self.assertEqual(result["error_type"], "io_error")
+
+    def test_source_url_connect_time_block_is_io_error(self):
+        import tools.url_safety as url_safety
+
+        def handler(request):
+            raise url_safety.SSRFConnectionBlocked("rebound to 100.100.1.2")
+        factory, _ = mock_ssrf_client(handler)
+        with patch.object(url_safety, "is_safe_url", return_value=True), \
+                patch.object(url_safety, "create_ssrf_safe_client", factory):
+            result = self.make().generate("edit", image_url="https://rebind.example/a.png")
+        self.assertEqual(result["error_type"], "io_error")
+        self.assertIn("private", result["error"])
+
+    def test_source_url_uses_guarded_client_without_redirects(self):
+        import httpx
+        import tools.url_safety as url_safety
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(200, headers={"Content-Type": "image/png"}, content=PNG_1536x1024)
+        factory, seen = mock_ssrf_client(handler)
+        with patch.object(url_safety, "is_safe_url", return_value=True), \
+                patch.object(url_safety, "create_ssrf_safe_client", factory):
+            result = self.make().generate("edit", image_url="https://cdn.example/src/cat.png",
+                                          model="gpt-image-2")
+        self.assertTrue(result["success"], result)
+        self.assertIs(seen["follow_redirects"], False)
+        self.assertEqual(requests[0].headers["User-Agent"], provider.USER_AGENT)
+        image = self.call(kind="edit_calls")["image"]
+        self.assertEqual((image.name, image.read()), ("cat.png", PNG_1536x1024))
+
+    def test_source_url_redirect_status_and_type_errors(self):
+        import httpx
+        import tools.url_safety as url_safety
+        cases = [
+            (httpx.Response(302, headers={"Location": "https://100.100.1.2/x.png"}), "redirected"),
+            (httpx.Response(404), "HTTP 404"),
+            (httpx.Response(200, headers={"Content-Type": "text/html"}, content=b"<html>"), "did not return an image"),
+            (httpx.Response(200, headers={"Content-Type": "image/png"}, content=b"not really"), "not a PNG"),
+        ]
+        for response, expected in cases:
+            factory, _ = mock_ssrf_client(lambda request, r=response: r)
+            with patch.object(url_safety, "is_safe_url", return_value=True), \
+                    patch.object(url_safety, "create_ssrf_safe_client", factory):
+                result = self.make().generate("edit", image_url="https://cdn.example/a.png?token=s3cr3t")
+            self.assertEqual(result["error_type"], "io_error", expected)
+            self.assertIn(expected, result["error"])
+            self.assertNotIn("s3cr3t", result["error"])
+        self.assertEqual(FakeClient.instances, [])
+
+    def test_source_url_size_cap(self):
+        import httpx
+        import tools.url_safety as url_safety
+        big = PNG_1536x1024 + b"\x00" * provider.MAX_SOURCE_IMAGE_BYTES
+        factory, _ = mock_ssrf_client(
+            lambda request: httpx.Response(200, headers={"Content-Type": "image/png"}, content=big))
+        with patch.object(url_safety, "is_safe_url", return_value=True), \
+                patch.object(url_safety, "create_ssrf_safe_client", factory):
+            result = self.make().generate("edit", image_url="https://cdn.example/a.png")
+        self.assertEqual(result["error_type"], "io_error")
+        self.assertIn("50MB", result["error"])
+
+    def test_source_url_must_be_https(self):
+        result = self.make().generate("edit", image_url="http://cdn.example/a.png")
+        self.assertEqual(result["error_type"], "io_error")
+        self.assertIn("HTTPS", result["error"])
 
     # -- errors ----------------------------------------------------------------------
 

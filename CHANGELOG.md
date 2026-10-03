@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.0.2
+
+- Source-image URLs now go through Hermes' SSRF guard (`tools.url_safety.is_safe_url` plus
+  `create_ssrf_safe_client`, redirects off). This closes a gap where hosts resolving to CGNAT /
+  Tailscale `100.64.0.0/10` were fetched, and pins the vetted IP at connect time against DNS
+  rebinding. `security.allow_private_urls` is honored the same way as in Hermes' other fetchers.
+- Source images from local paths, data URLs and HTTPS URLs must start with PNG, JPEG, WebP or GIF
+  magic bytes; anything else is an `io_error` and is never uploaded to the gateway.
+- Never forward `OPENAI_ORG_ID` / `OPENAI_PROJECT_ID` as `OpenAI-Organization` / `OpenAI-Project`
+  headers to the third-party gateway.
+- Declare `requires_hermes: ">=0.20.1"`, the first release that reads
+  `plugins.entries.<id>.settings` through `ctx.get_config`.
+
 ## 2.0.1
 
 - Accept plain `http://` gateways whose host resolves only to private networks (loopback, RFC 1918
