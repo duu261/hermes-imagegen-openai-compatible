@@ -75,8 +75,16 @@ hermes plugins validate .
 ```
 
 - Unit tests prove the outgoing request (`model`, `size`, `quality`, headers) and error mapping.
-  They do not prove what a gateway rendered: for a live check, generate once and compare
-  `requested_size` with `output_size`.
+  They do not prove what a gateway rendered. Before a tag or catalog SHA bump, run the live check
+  against real gateways (throwaway `HERMES_HOME`; the live profile is never touched):
+
+  ```bash
+  PYTHONPATH=~/.hermes/hermes-agent ~/.hermes/hermes-agent/venv/bin/python scripts/live_e2e.py \
+    --gateway cpa=http://127.0.0.1:8317/v1=CPA_KEY_VAR --gateway newapi=env:BASE_URL_VAR=KEY_VAR
+  ```
+
+  It spends three generations per gateway; `--refusals-only` runs the free refusal checks alone.
+  A `[SKIP]` line is not a pass: say which check was skipped.
 - After pushing, check the GitHub Actions run; a red workflow means not shipped.
 - Get one independent read-only review before a release tag or a catalog SHA bump.
 
