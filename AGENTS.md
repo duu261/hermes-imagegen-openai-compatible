@@ -96,5 +96,10 @@ hermes plugins validate .
   plugin registers (no tools/hooks/middleware; `requires_env` lists `OPENAI_COMPAT_IMAGE_API_KEY`).
   Every SHA bump is a new reviewed PR there. The catalog PR is opened by the maintainer, not by an
   agent on its own.
+- Bump cadence: each catalog bump costs a maintainer review and days of waiting. Bump right away for
+  security fixes; batch other changes into fewer bumps. Keep `main` releasable, because direct
+  `owner/repo` installs pull it on `hermes plugins update`.
+- The README leads with the catalog install (`hermes plugins install openai-compatible`) and keeps
+  `owner/repo` as the unreleased-changes route. The author's own live install stays a dev install.
 - Installs into a live Hermes (`hermes plugins install --force --ref <sha>`) and gateway restarts are
   the operator's actions.
