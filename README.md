@@ -30,13 +30,27 @@ Use this plugin when your images go through CPA or New API:
 
 ## Install
 
+From the [Hermes plugin catalog](https://hermes-agent.nousresearch.com/docs/plugins/openai-compatible)
+(recommended):
+
+```bash
+hermes plugins install openai-compatible
+hermes plugins enable openai-compatible
+```
+
+This installs the commit the catalog maintainers reviewed. `hermes plugins update openai-compatible`
+moves to a newer release only after its catalog pin is bumped.
+
+Restart a running gateway afterwards (`hermes gateway restart`); new `hermes chat` sessions pick it
+up directly.
+
+Want unreleased changes from `main`? Install from GitHub instead. Hermes marks this as an unreviewed
+source, and `hermes plugins update openai-compatible` pulls the latest `main`:
+
 ```bash
 hermes plugins install duu261/hermes-imagegen-openai-compatible
 hermes plugins enable openai-compatible
 ```
-
-Restart a running gateway afterwards (`hermes gateway restart`); new `hermes chat` sessions pick it
-up directly.
 
 ## Configure
 
