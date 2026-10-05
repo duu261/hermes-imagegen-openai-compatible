@@ -79,6 +79,12 @@ hermes config set plugins.entries.openai-compatible.settings.key_env MY_GATEWAY_
 The model comes from `image_gen.model`. A quality suffix overrides the `quality` setting for that
 model: `gpt-image-2-high` sends `model: gpt-image-2, quality: high`.
 
+**Switching models.** Hermes' `image_generate` tool has no `model` argument; the configured
+`image_gen.model` is the only selector. To switch, run `hermes config set image_gen.model <id>`
+yourself, or let the agent run it from its terminal tool before calling `image_generate`. Hermes
+re-reads config on every call, so the next generation uses the new model without a restart. The
+change is profile-wide and persists until set again.
+
 | Model id | Sent as |
 |---|---|
 | `gpt-image-2`, `gpt-image-2.5`, `gpt-image-2.5-flare`, `gpt-image-2.5-sunburst`, `gpt-image-1`, `gpt-image-1.5` | model + `size` from the aspect ratio + `quality` |
